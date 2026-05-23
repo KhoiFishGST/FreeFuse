@@ -226,8 +226,15 @@ def _resolve_image_ref_path(path_like: Optional[str], ref_type: Optional[str]) -
 
 def _load_mask_from_image_ref(
     image_ref,
-    target_h: int,
-    target_w: int,
+    target_h: Optional[int] = None,
+    target_w: Optional[int] = None,
+    *,
+    use_alpha: bool = True,
+    invert_alpha: bool = True,
+    prefer_alpha: bool = False,
+    threshold: float = _MASK_BINARY_THRESHOLD,
+    binarize: bool = True,
+    warning_prefix: str = "[FreeFuseMaskTap]",
 ) -> Optional[torch.Tensor]:
     if Image is None:
         return None
@@ -241,19 +248,24 @@ def _load_mask_from_image_ref(
         with Image.open(resolved_path) as img:
             gray = np.array(img.convert("L")).astype(np.float32) / 255.0
             mask_2d = torch.from_numpy(gray)
-            if "A" in img.getbands():
+            if bool(use_alpha) and "A" in img.getbands():
                 alpha = np.array(img.getchannel("A")).astype(np.float32) / 255.0
-                alpha_mask = 1.0 - torch.from_numpy(alpha)
-                # Prefer visible grayscale content. Fallback to alpha when RGB is flat.
-                if float(np.var(gray)) <= _MASK_SIGNAL_EPS and float(np.var(alpha)) > _MASK_SIGNAL_EPS:
+                alpha_values = 1.0 - alpha if bool(invert_alpha) else alpha
+                alpha_mask = torch.from_numpy(alpha_values)
+                gray_has_signal = float(np.var(gray)) > _MASK_SIGNAL_EPS
+                alpha_has_signal = float(np.var(alpha)) > _MASK_SIGNAL_EPS
+                if alpha_has_signal and (bool(prefer_alpha) or not gray_has_signal):
                     mask_2d = alpha_mask
         mask_2d = mask_2d.float()
         if mask_2d.dim() != 2:
             return None
-        mask_2d = _resize_2d(mask_2d, target_h, target_w, mode="nearest")
-        return _binarize_2d(mask_2d)
+        if target_h is not None and target_w is not None:
+            mask_2d = _resize_2d(mask_2d, int(target_h), int(target_w), mode="nearest")
+        if bool(binarize):
+            mask_2d = _binarize_2d(mask_2d, threshold)
+        return mask_2d
     except Exception as e:
-        print(f"[FreeFuseMaskTap] Warning: failed to load edited mask '{resolved_path}': {e}")
+        print(f"{warning_prefix} Warning: failed to load mask '{resolved_path}': {e}")
         return None
 
 
