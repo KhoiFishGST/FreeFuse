@@ -1187,6 +1187,54 @@ def _create_z_image_attention_override(
             mask = mask.unsqueeze(1)
         return bias + mask
 
+    def _attention_with_bias(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        heads: int,
+        attn_mask: torch.Tensor,
+        skip_reshape: bool = False,
+        skip_output_reshape: bool = False,
+        **kwargs,
+    ) -> torch.Tensor:
+        if skip_reshape:
+            batch, _, _, dim_head = q.shape
+            q_attn, k_attn, v_attn = q, k, v
+        else:
+            batch, _, dim_head = q.shape
+            dim_head //= heads
+            q_attn, k_attn, v_attn = map(
+                lambda t: t.view(batch, -1, heads, dim_head).transpose(1, 2),
+                (q, k, v),
+            )
+
+        if kwargs.get("enable_gqa", False) and q_attn.shape[-3] != k_attn.shape[-3]:
+            repeat = q_attn.shape[-3] // k_attn.shape[-3]
+            k_attn = k_attn.repeat_interleave(repeat, dim=-3)
+            v_attn = v_attn.repeat_interleave(repeat, dim=-3)
+
+        if attn_mask.dim() == 2:
+            attn_mask = attn_mask.unsqueeze(0).unsqueeze(0)
+        elif attn_mask.dim() == 3:
+            attn_mask = attn_mask.unsqueeze(1)
+
+        sdpa_kwargs = {}
+        if "scale" in kwargs:
+            sdpa_kwargs["scale"] = kwargs["scale"]
+
+        out = torch.nn.functional.scaled_dot_product_attention(
+            q_attn,
+            k_attn,
+            v_attn,
+            attn_mask=attn_mask,
+            dropout_p=0.0,
+            is_causal=False,
+            **sdpa_kwargs,
+        )
+        if skip_output_reshape:
+            return out
+        return out.transpose(1, 2).reshape(batch, -1, heads * dim_head)
+
     def attention_override(
         original_fn: Callable,
         q: torch.Tensor,
@@ -1231,6 +1279,6 @@ def _create_z_image_attention_override(
             return original_fn(q, k, v, heads, mask, *args, transformer_options=transformer_options, **kwargs)
 
         attn_mask = _combine_mask(mask, bias, q.device, q.dtype)
-        return original_fn(q, k, v, heads, attn_mask, *args, transformer_options=transformer_options, **kwargs)
+        return _attention_with_bias(q, k, v, heads, attn_mask, **kwargs)
 
     return attention_override

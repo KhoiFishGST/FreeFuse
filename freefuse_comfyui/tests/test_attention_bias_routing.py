@@ -164,6 +164,43 @@ class TestAttentionBiasRouting(unittest.TestCase):
 
         self.assertIsNone(seen["mask"])
 
+    def test_z_image_override_avoids_backend_tensor_mask_failure(self):
+        module = _load_attention_bias_patch_module()
+        model = DummyModelPatcher(DummyDiffusionModel(n_layers=3))
+        config = module.AttentionBiasConfig(enabled=True, apply_to_blocks=None)
+        module.apply_attention_bias_patches(
+            model_patcher=model,
+            attention_bias=None,
+            config=config,
+            txt_seq_len=8,
+            model_type="z_image",
+            lora_masks={"a": torch.ones(1, 4)},
+            token_pos_maps={"a": [[0, 1]]},
+        )
+        override = model.model_options["transformer_options"]["optimized_attention_override"]
+
+        def original_fn(q, k, v, heads, mask=None, *args, transformer_options=None, **kwargs):
+            if isinstance(mask, torch.Tensor):
+                raise NotImplementedError("backend rejects tensor attn_bias")
+            return q
+
+        q = torch.randn(1, 2, 10, 4)
+        k = torch.randn(1, 2, 10, 4)
+        v = torch.randn(1, 2, 10, 4)
+
+        out = override(
+            original_fn,
+            q,
+            k,
+            v,
+            2,
+            None,
+            skip_reshape=True,
+            transformer_options={"block_index": 0},
+        )
+
+        self.assertEqual(out.shape, (1, 10, 8))
+
 
 if __name__ == "__main__":
     unittest.main()
