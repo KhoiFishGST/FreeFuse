@@ -304,6 +304,7 @@ def test_mask_bank_from_images_alpha_defaults_and_invert():
         path = os.path.join(td, "alpha.png")
         _save_split_alpha(path, left_alpha=0, right_alpha=255)
 
+        # Source images use direct alpha by default: alpha 0 -> mask 0, alpha 255 -> mask 1.
         normal, = node.build_mask_bank(
             freefuse_data=_freefuse_data("alpha_lora"),
             mask_image_00=path,
