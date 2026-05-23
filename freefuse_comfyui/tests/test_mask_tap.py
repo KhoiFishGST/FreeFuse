@@ -272,6 +272,24 @@ def test_ui_editor_image_contains_visible_rgb_and_alpha_mask():
         mod.folder_paths = original_folder_paths
 
 
+def test_load_mask_prefer_alpha_uses_flat_alpha():
+    mod = _module()
+
+    with tempfile.TemporaryDirectory() as td:
+        path = os.path.join(td, "flat_alpha.png")
+        Image.new("RGBA", (4, 2), (255, 255, 255, 0)).save(path)
+
+        mask = mod._load_mask_from_image_ref(
+            path,
+            use_alpha=True,
+            invert_alpha=False,
+            prefer_alpha=True,
+        )
+
+    assert mask.shape == (2, 4)
+    assert torch.allclose(mask, torch.zeros(2, 4), atol=1e-6)
+
+
 def test_mask_bank_from_images_builds_bank_in_adapter_order():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
@@ -385,6 +403,7 @@ def run_all_tests():
     test_tap_user_edit_ref_requires_matching_phase1_seed()
     test_tap_legacy_untagged_edit_ref_ignored_when_phase1_seed_present()
     test_ui_editor_image_contains_visible_rgb_and_alpha_mask()
+    test_load_mask_prefer_alpha_uses_flat_alpha()
     test_mask_bank_from_images_builds_bank_in_adapter_order()
     test_mask_bank_from_images_alpha_defaults_and_invert()
     test_mask_bank_from_images_resizes_and_skips_empty_slots()

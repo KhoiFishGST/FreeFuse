@@ -254,7 +254,7 @@ def _load_mask_from_image_ref(
                 alpha_mask = torch.from_numpy(alpha_values)
                 gray_has_signal = float(np.var(gray)) > _MASK_SIGNAL_EPS
                 alpha_has_signal = float(np.var(alpha)) > _MASK_SIGNAL_EPS
-                if alpha_has_signal and (bool(prefer_alpha) or not gray_has_signal):
+                if bool(prefer_alpha) or (alpha_has_signal and not gray_has_signal):
                     mask_2d = alpha_mask
         mask_2d = mask_2d.float()
         if mask_2d.dim() != 2:
