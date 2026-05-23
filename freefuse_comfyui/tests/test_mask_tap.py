@@ -27,6 +27,11 @@ def _module():
     return _load_module("freefuse_mask_tap_for_test", path)
 
 
+def _freefuse_dir():
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.dirname(script_dir)
+
+
 def _unwrap_result(value):
     if isinstance(value, dict) and "result" in value:
         return value["result"]
@@ -381,6 +386,19 @@ def test_mask_bank_from_images_local_registration():
     assert mod.NODE_DISPLAY_NAME_MAPPINGS["FreeFuseMaskBankFromImages"] == "FreeFuse Mask Bank From Images"
 
 
+def test_mask_bank_from_images_package_export_registration():
+    freefuse_dir = _freefuse_dir()
+    with open(os.path.join(freefuse_dir, "nodes", "__init__.py"), "r", encoding="utf-8") as f:
+        nodes_init = f.read()
+    with open(os.path.join(freefuse_dir, "__init__.py"), "r", encoding="utf-8") as f:
+        package_init = f.read()
+
+    assert "FreeFuseMaskBankFromImages" in nodes_init
+    assert '"FreeFuseMaskBankFromImages": FreeFuseMaskBankFromImages' in nodes_init
+    assert '"FreeFuseMaskBankFromImages": "FreeFuse Mask Bank From Images"' in nodes_init
+    assert "FreeFuseMaskBankFromImages" in package_init
+
+
 def test_mask_bank_from_images_no_adapters_returns_empty_bank():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
@@ -408,6 +426,7 @@ def run_all_tests():
     test_mask_bank_from_images_alpha_defaults_and_invert()
     test_mask_bank_from_images_resizes_and_skips_empty_slots()
     test_mask_bank_from_images_local_registration()
+    test_mask_bank_from_images_package_export_registration()
     test_mask_bank_from_images_no_adapters_returns_empty_bank()
     print("All mask tap/reassemble tests passed.")
 
