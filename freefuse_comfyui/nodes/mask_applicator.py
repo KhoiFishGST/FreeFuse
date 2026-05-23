@@ -267,7 +267,7 @@ When enabled, constructs soft attention bias to guide cross-attention:
                 attention_bias=None,  # Not used - bias built dynamically
                 config=config,
                 txt_seq_len=txt_seq_len,  # Estimate - actual determined at runtime
-                model_type="flux",
+                model_type=model_type,
                 lora_masks=lora_masks_flat,
                 token_pos_maps=token_pos_maps,
             )

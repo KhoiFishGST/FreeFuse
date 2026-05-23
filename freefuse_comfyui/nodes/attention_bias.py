@@ -205,7 +205,7 @@ Parameters:
                 attention_bias=attention_bias,  # For debugging/preview
                 config=config,
                 txt_seq_len=txt_seq_len,  # Estimate - actual determined at runtime
-                model_type="flux",
+                model_type=model_type,
                 lora_masks=lora_masks_flat,
                 token_pos_maps=token_pos_maps,
             )

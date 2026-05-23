@@ -927,24 +927,63 @@ def _apply_flux_bias_patches(
     # Get model structure
     try:
         diffusion_model = model_patcher.model.diffusion_model
-        num_double_blocks = len(diffusion_model.double_blocks)
-        num_single_blocks = len(diffusion_model.single_blocks)
     except AttributeError:
         logging.warning("[FreeFuse] Could not access Flux model structure")
         return
+
+    double_blocks = getattr(diffusion_model, "double_blocks", None)
+    if double_blocks is None:
+        double_blocks = []
+
+    single_blocks = getattr(diffusion_model, "single_blocks", None)
+    if (single_blocks is None or len(single_blocks) == 0) and hasattr(
+        diffusion_model, "single_transformer_blocks"
+    ):
+        single_blocks = diffusion_model.single_transformer_blocks
+    if single_blocks is None:
+        single_blocks = []
+
+    if len(double_blocks) == 0 and len(single_blocks) == 0:
+        logging.warning("[FreeFuse] Could not find Flux attention-bias block lists")
+        return
+
+    effective_config = config
+    if len(double_blocks) == 0 and len(single_blocks) > 0 and isinstance(config.apply_to_blocks, str):
+        if config.apply_to_blocks == "double_stream_only":
+            effective_config = AttentionBiasConfig(
+                enabled=config.enabled,
+                bias_scale=config.bias_scale,
+                positive_bias_scale=config.positive_bias_scale,
+                bidirectional=config.bidirectional,
+                use_positive_bias=config.use_positive_bias,
+                apply_to_blocks=None,
+            )
+        elif config.apply_to_blocks == "last_half_double":
+            half = len(single_blocks) // 2
+            effective_config = AttentionBiasConfig(
+                enabled=config.enabled,
+                bias_scale=config.bias_scale,
+                positive_bias_scale=config.positive_bias_scale,
+                bidirectional=config.bidirectional,
+                use_positive_bias=config.use_positive_bias,
+                apply_to_blocks=[
+                    f"single_transformer_blocks.{i}"
+                    for i in range(half, len(single_blocks))
+                ],
+            )
     
     double_patches = 0
     single_patches = 0
     
     # Apply to double blocks
-    for i in range(num_double_blocks):
+    for i in range(len(double_blocks)):
         block_name = f"transformer_blocks.{i}"
-        if config.should_apply_to_block(block_name):
-            block = diffusion_model.double_blocks[i]
+        if effective_config.should_apply_to_block(block_name):
+            block = double_blocks[i]
             replacer = FreeFuseFluxBiasBlockReplace(
                 lora_masks=lora_masks,
                 token_pos_maps=token_pos_maps,
-                config=config,
+                config=effective_config,
                 block_index=i,
                 block=block,  # Pass actual block reference
             )
@@ -957,14 +996,14 @@ def _apply_flux_bias_patches(
             double_patches += 1
     
     # Apply to single blocks
-    for i in range(num_single_blocks):
+    for i in range(len(single_blocks)):
         block_name = f"single_transformer_blocks.{i}"
-        if config.should_apply_to_block(block_name):
-            block = diffusion_model.single_blocks[i]
+        if effective_config.should_apply_to_block(block_name):
+            block = single_blocks[i]
             replacer = FreeFuseFluxBiasSingleBlockReplace(
                 lora_masks=lora_masks,
                 token_pos_maps=token_pos_maps,
-                config=config,
+                config=effective_config,
                 block_index=i,
                 block=block,  # Pass actual block reference
             )
@@ -1082,25 +1121,116 @@ def _apply_z_image_bias_patches(
                 apply_to_blocks=apply_to_blocks,
             )
     
-    patches_applied = 0
-    
-    for i in range(num_layers):
-        block_name = f"layers.{i}"
-        if config.should_apply_to_block(block_name):
-            block = diffusion_model.layers[i]
-            replacer = FreeFuseZImageBiasBlockReplace(
+    if "transformer_options" not in model_patcher.model_options:
+        model_patcher.model_options["transformer_options"] = {}
+
+    model_patcher.model_options["transformer_options"]["optimized_attention_override"] = (
+        _create_z_image_attention_override(lora_masks, token_pos_maps, config)
+    )
+
+    patches_applied = sum(
+        1 for i in range(num_layers) if config.should_apply_to_block(f"layers.{i}")
+    )
+    logging.info(f"[FreeFuse] Applied attention bias override to {patches_applied} Z-Image transformer layers")
+
+
+def _create_z_image_attention_override(
+    lora_masks: Dict[str, torch.Tensor],
+    token_pos_maps: Dict[str, List[List[int]]],
+    config: AttentionBiasConfig,
+) -> Callable:
+    """Create Lumina2 attention override that injects FreeFuse additive bias."""
+    bias_cache: Dict[Tuple[int, int], Optional[torch.Tensor]] = {}
+
+    def _infer_img_len() -> Optional[int]:
+        if not lora_masks:
+            return None
+        first_mask = next(iter(lora_masks.values()))
+        if first_mask.dim() == 2:
+            return int(first_mask.shape[1])
+        if first_mask.dim() == 1:
+            return int(first_mask.shape[0])
+        if first_mask.dim() == 3:
+            return int(first_mask.shape[1] * first_mask.shape[2])
+        return int(first_mask.numel())
+
+    def _get_seq_len(q: torch.Tensor) -> Optional[int]:
+        if q.dim() == 4:
+            return int(q.shape[2])
+        if q.dim() == 3:
+            return int(q.shape[1])
+        return None
+
+    def _combine_mask(
+        mask: Optional[torch.Tensor],
+        bias: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        if bias.dim() == 3:
+            bias = bias.unsqueeze(1)
+        bias = bias.to(device=device, dtype=dtype)
+        if mask is None:
+            return bias
+
+        mask = mask.to(device=device)
+        if mask.dtype == torch.bool:
+            float_mask = torch.zeros_like(mask, dtype=dtype)
+            float_mask.masked_fill_(~mask, torch.finfo(dtype).min)
+            mask = float_mask
+        else:
+            mask = mask.to(dtype=dtype)
+
+        if mask.dim() == 2:
+            mask = mask.unsqueeze(1).unsqueeze(1)
+        elif mask.dim() == 3:
+            mask = mask.unsqueeze(1)
+        return bias + mask
+
+    def attention_override(
+        original_fn: Callable,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        heads: int,
+        mask: Optional[torch.Tensor] = None,
+        *args,
+        transformer_options: Dict[str, Any] = {},
+        **kwargs,
+    ) -> torch.Tensor:
+        block_index = int(transformer_options.get("block_index", -1))
+        if block_index < 0 or not config.should_apply_to_block(f"layers.{block_index}"):
+            return original_fn(q, k, v, heads, mask, *args, transformer_options=transformer_options, **kwargs)
+
+        seq_len = _get_seq_len(q)
+        img_len = _infer_img_len()
+        if seq_len is None or img_len is None:
+            return original_fn(q, k, v, heads, mask, *args, transformer_options=transformer_options, **kwargs)
+
+        cap_len = seq_len - img_len
+        if cap_len <= 0:
+            return original_fn(q, k, v, heads, mask, *args, transformer_options=transformer_options, **kwargs)
+
+        cache_key = (cap_len, img_len)
+        if cache_key not in bias_cache:
+            bias_cache[cache_key] = construct_attention_bias(
                 lora_masks=lora_masks,
                 token_pos_maps=token_pos_maps,
-                config=config,
-                block_index=i,
-                block=block,
+                txt_seq_len=cap_len,
+                img_seq_len=img_len,
+                bias_scale=config.bias_scale,
+                positive_bias_scale=config.positive_bias_scale,
+                bidirectional=config.bidirectional,
+                use_positive_bias=config.use_positive_bias,
+                device=q.device,
+                dtype=q.dtype,
             )
-            model_patcher.set_model_patch_replace(
-                replacer.create_block_replace(),
-                "dit",
-                "layer",
-                i,
-            )
-            patches_applied += 1
-    
-    logging.info(f"[FreeFuse] Applied attention bias to {patches_applied} Z-Image transformer layers")
+
+        bias = bias_cache.get(cache_key)
+        if bias is None:
+            return original_fn(q, k, v, heads, mask, *args, transformer_options=transformer_options, **kwargs)
+
+        attn_mask = _combine_mask(mask, bias, q.device, q.dtype)
+        return original_fn(q, k, v, heads, attn_mask, *args, transformer_options=transformer_options, **kwargs)
+
+    return attention_override
