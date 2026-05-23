@@ -316,6 +316,119 @@ def _build_mask_editor_ui_images(slot_masks_2d: List[torch.Tensor]) -> List[Dict
     return refs
 
 
+class FreeFuseMaskBankFromImages:
+    """
+    Build a FREEFUSE_MASKS bank directly from user-supplied mask images.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "freefuse_data": ("FREEFUSE_DATA",),
+            },
+            "optional": {
+                "mask_image_00": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_01": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_02": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_03": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_04": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_05": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_06": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_07": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_08": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_09": ("STRING", {"default": "", "multiline": False}),
+                "width": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8}),
+                "height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8}),
+                "use_alpha": ("BOOLEAN", {"default": True}),
+                "invert_alpha": ("BOOLEAN", {"default": False}),
+                "threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+            },
+        }
+
+    RETURN_TYPES = ("FREEFUSE_MASKS",)
+    RETURN_NAMES = ("mask_bank",)
+    FUNCTION = "build_mask_bank"
+    CATEGORY = "FreeFuse/Utils"
+
+    @staticmethod
+    def _adapter_names(freefuse_data) -> List[str]:
+        names: List[str] = []
+        seen = set()
+        adapters = freefuse_data.get("adapters", []) if isinstance(freefuse_data, dict) else []
+        if not isinstance(adapters, list):
+            return names
+        for adapter in adapters:
+            if isinstance(adapter, dict):
+                name = adapter.get("name")
+            else:
+                name = adapter
+            if isinstance(name, str) and name and name not in seen:
+                names.append(name)
+                seen.add(name)
+        return names
+
+    @staticmethod
+    def _target_size(width, height) -> Tuple[Optional[int], Optional[int]]:
+        try:
+            w = int(width)
+            h = int(height)
+        except Exception:
+            w, h = 0, 0
+        if w > 0 and h > 0:
+            return h, w
+        if w > 0 or h > 0:
+            print("[FreeFuseMaskBankFromImages] Warning: width and height must both be nonzero; keeping native mask size")
+        return None, None
+
+    def build_mask_bank(
+        self,
+        freefuse_data,
+        width=0,
+        height=0,
+        use_alpha=True,
+        invert_alpha=False,
+        threshold=0.5,
+        **kwargs,
+    ):
+        adapter_names = self._adapter_names(freefuse_data)
+        target_h, target_w = self._target_size(width, height)
+        masks: Dict[str, torch.Tensor] = {}
+
+        for i, adapter_name in enumerate(adapter_names[:10]):
+            key = f"mask_image_{i:02d}"
+            image_ref = kwargs.get(key)
+            path_like, _ = _parse_image_ref(image_ref)
+            if path_like is None:
+                continue
+
+            mask = _load_mask_from_image_ref(
+                image_ref=image_ref,
+                target_h=target_h,
+                target_w=target_w,
+                use_alpha=bool(use_alpha),
+                invert_alpha=bool(invert_alpha),
+                prefer_alpha=True,
+                threshold=float(threshold),
+                binarize=True,
+                warning_prefix="[FreeFuseMaskBankFromImages]",
+            )
+            if mask is None:
+                print(f"[FreeFuseMaskBankFromImages] Warning: failed to load {key} for adapter '{adapter_name}'")
+                continue
+            masks[adapter_name] = mask.float()
+
+        mask_bank = {
+            "masks": masks,
+            "similarity_maps": {},
+            "metadata": {
+                "adapter_names": adapter_names,
+                "source": "mask_images",
+            },
+        }
+        return (mask_bank,)
+
+
 class FreeFuseMaskTap:
     """
     Prepare deterministic per-adapter mask slots for interactive editing.
@@ -642,11 +755,13 @@ class FreeFuseMaskReassemble:
 
 
 NODE_CLASS_MAPPINGS = {
+    "FreeFuseMaskBankFromImages": FreeFuseMaskBankFromImages,
     "FreeFuseMaskTap": FreeFuseMaskTap,
     "FreeFuseMaskReassemble": FreeFuseMaskReassemble,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "FreeFuseMaskBankFromImages": "FreeFuse Mask Bank From Images",
     "FreeFuseMaskTap": "FreeFuse Mask Tap",
     "FreeFuseMaskReassemble": "FreeFuse Mask Reassemble",
 }
