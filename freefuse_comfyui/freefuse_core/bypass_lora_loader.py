@@ -267,6 +267,7 @@ class MultiAdapterBypassForwardHook:
         self.latent_size: Optional[Tuple[int, int]] = None  # (H, W) of latent
         self.mask_enabled: bool = False
         self.txt_len: int = 256  # Default Flux txt length (CLIP + T5)
+        self.token_pos_maps: Optional[Dict[str, List[List[int]]]] = None
         
         # LoRA enable/disable support (for Phase 1 mask collection)
         self.lora_enabled: bool = True
@@ -296,6 +297,7 @@ class MultiAdapterBypassForwardHook:
         new_obj.latent_size = copy.deepcopy(self.latent_size, memo)
         new_obj.mask_enabled = self.mask_enabled
         new_obj.txt_len = self.txt_len
+        new_obj.token_pos_maps = copy.deepcopy(self.token_pos_maps, memo)
         new_obj.lora_enabled = self.lora_enabled
         new_obj._should_apply_mask_cached = self._should_apply_mask_cached
         new_obj._mask_type_cached = self._mask_type_cached
@@ -341,6 +343,7 @@ class MultiAdapterBypassForwardHook:
         masks: Dict[str, torch.Tensor],
         latent_size: Tuple[int, int],
         txt_len: int = 256,
+        token_pos_maps: Optional[Dict[str, List[List[int]]]] = None,
     ):
         """
         Set FreeFuse masks for spatial LoRA application.
@@ -349,17 +352,24 @@ class MultiAdapterBypassForwardHook:
             masks: Dict mapping adapter_name -> spatial mask (H, W)
             latent_size: (H, W) of the latent space
             txt_len: Length of text tokens (for Flux: CLIP + T5 = 256)
+            token_pos_maps: Optional concept token positions for token-level masking
         """
         self.masks = masks
         self.latent_size = latent_size
         self.mask_enabled = True
         self.txt_len = txt_len
+        self.token_pos_maps = token_pos_maps
         logging.debug(f"[OffsetBypass] Set masks for {len(masks)} adapters, latent_size={latent_size}, txt_len={txt_len}")
+
+    def set_token_pos_maps(self, token_pos_maps: Optional[Dict[str, List[List[int]]]]):
+        """Set token positions for token-level cross-adapter masking."""
+        self.token_pos_maps = token_pos_maps
     
     def clear_masks(self):
         """Disable mask application."""
         self.masks = None
         self.latent_size = None
+        self.token_pos_maps = None
         self.mask_enabled = False
     
     def disable_lora(self):
@@ -703,6 +713,81 @@ class MultiAdapterBypassForwardHook:
                 )
         
         return full_mask
+
+    @staticmethod
+    def _first_batch_positions(positions_list) -> List[int]:
+        """Normalize token_pos_maps entries to first-batch integer positions."""
+        if positions_list is None:
+            return []
+
+        if torch.is_tensor(positions_list):
+            raw_positions = positions_list.detach().cpu().view(-1).tolist()
+        elif isinstance(positions_list, (list, tuple)):
+            if not positions_list:
+                return []
+            first = positions_list[0]
+            if torch.is_tensor(first):
+                raw_positions = first.detach().cpu().view(-1).tolist()
+            elif isinstance(first, (list, tuple, set)):
+                raw_positions = list(first)
+            else:
+                raw_positions = list(positions_list)
+        elif isinstance(positions_list, set):
+            raw_positions = list(positions_list)
+        else:
+            raw_positions = [positions_list]
+
+        positions: List[int] = []
+        for pos in raw_positions:
+            try:
+                positions.append(int(pos))
+            except (TypeError, ValueError):
+                continue
+        return positions
+
+    def _other_adapter_token_positions(self, adapter_name: str, seq_len: int) -> List[int]:
+        """Return text token positions belonging to adapters other than adapter_name."""
+        if not self.token_pos_maps:
+            return []
+
+        positions = []
+        for name, positions_list in self.token_pos_maps.items():
+            if name == adapter_name or str(name).startswith("_"):
+                continue
+            for pos in self._first_batch_positions(positions_list):
+                if 0 <= pos < seq_len:
+                    positions.append(pos)
+
+        return sorted(set(positions))
+
+    def _apply_token_position_masking(
+        self,
+        h_out: torch.Tensor,
+        adapter_name: str,
+        seq_len: int,
+    ) -> torch.Tensor:
+        """Zero this adapter's LoRA output at other adapters' text tokens."""
+        if not self.mask_enabled or not self.token_pos_maps or not adapter_name:
+            return h_out
+
+        mask_type = self._get_mask_type()
+        if mask_type == 'img_only':
+            return h_out
+        if mask_type is None and seq_len > self.txt_len:
+            return h_out
+
+        positions = self._other_adapter_token_positions(adapter_name, seq_len)
+        if not positions:
+            return h_out
+
+        token_mask = torch.ones(seq_len, device=h_out.device, dtype=h_out.dtype)
+        token_mask[positions] = 0
+
+        if h_out.dim() == 2:
+            return h_out * token_mask.view(-1, 1)
+        if h_out.dim() == 3:
+            return h_out * token_mask.view(1, -1, 1)
+        return h_out
     
     def _bypass_forward(self, x: torch.Tensor, *args, **kwargs) -> torch.Tensor:
         """
@@ -765,6 +850,8 @@ class MultiAdapterBypassForwardHook:
                 self._move_adapter_weights_to_device(adapter, x.device, dtype=None)
 
             h_out = adapter.h(x, base_out)
+            if self.mask_enabled and adapter_name and seq_len is not None:
+                h_out = self._apply_token_position_masking(h_out, adapter_name, seq_len)
             
             # Apply FreeFuse mask if available AND this layer should have mask applied
             # Check _should_apply_spatial_mask to match diffusers implementation
@@ -965,6 +1052,7 @@ class OffsetBypassInjectionManager:
         self._pending_masks: Optional[Dict[str, torch.Tensor]] = None
         self._pending_latent_size: Optional[Tuple[int, int]] = None
         self._pending_txt_len: int = 256
+        self._pending_token_pos_maps: Optional[Dict[str, List[List[int]]]] = None
 
         # Track which model instance the current `hooks` list was built for.
         # ModelPatcher.clone() deepcopies model_options, which can leave hooks
@@ -1123,7 +1211,8 @@ class OffsetBypassInjectionManager:
                     hook.set_masks(
                         current_manager._pending_masks,
                         current_manager._pending_latent_size,
-                        current_manager._pending_txt_len
+                        current_manager._pending_txt_len,
+                        token_pos_maps=current_manager._pending_token_pos_maps,
                     )
         
         def eject_all(model_patcher):
@@ -1173,6 +1262,7 @@ class OffsetBypassInjectionManager:
         masks: Dict[str, torch.Tensor],
         latent_size: Tuple[int, int],
         txt_len: int = 256,
+        token_pos_maps: Optional[Dict[str, List[List[int]]]] = None,
     ):
         """
         Set FreeFuse masks on all hooks.
@@ -1184,11 +1274,13 @@ class OffsetBypassInjectionManager:
             masks: Dict mapping adapter_name -> spatial mask (H, W)
             latent_size: (H, W) of the latent space
             txt_len: Length of text tokens (for Flux: CLIP + T5)
+            token_pos_maps: Optional concept token positions for token-level masking
         """
         # Store as pending for future inject() calls
         self._pending_masks = masks
         self._pending_latent_size = latent_size
         self._pending_txt_len = txt_len
+        self._pending_token_pos_maps = token_pos_maps
         
         # Apply to existing hooks immediately (if already injected)
         hooks_updated = 0
@@ -1200,7 +1292,7 @@ class OffsetBypassInjectionManager:
                 and current_forward.__self__ is hook
             )
             if is_injected:
-                hook.set_masks(masks, latent_size, txt_len)
+                hook.set_masks(masks, latent_size, txt_len, token_pos_maps=token_pos_maps)
                 hooks_updated += 1
         
         if hooks_updated > 0:
@@ -1212,6 +1304,7 @@ class OffsetBypassInjectionManager:
         """Clear masks from all hooks."""
         self._pending_masks = None
         self._pending_latent_size = None
+        self._pending_token_pos_maps = None
         for hook in self.hooks:
             hook.clear_masks()
     
