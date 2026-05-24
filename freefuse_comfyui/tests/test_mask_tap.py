@@ -419,7 +419,7 @@ def test_mask_bank_from_images_local_registration():
 
     inputs = mod.FreeFuseMaskBankFromImages.INPUT_TYPES()
     for i in range(10):
-        assert inputs["optional"][f"mask_image_{i:02d}"] == ("IMAGE",)
+        assert inputs["optional"][f"mask_image_{i:02d}"][0] == "IMAGE"
 
 
 def test_mask_bank_from_images_package_export_registration():
