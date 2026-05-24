@@ -269,6 +269,50 @@ def _load_mask_from_image_ref(
         return None
 
 
+def _load_mask_from_image_tensor(
+    image_tensor,
+    target_h: Optional[int] = None,
+    target_w: Optional[int] = None,
+    *,
+    use_alpha: bool = True,
+    invert_alpha: bool = False,
+    threshold: float = _MASK_BINARY_THRESHOLD,
+    binarize: bool = True,
+    warning_prefix: str = "[FreeFuseMaskBankFromImages]",
+) -> Optional[torch.Tensor]:
+    if not isinstance(image_tensor, torch.Tensor):
+        return None
+
+    try:
+        img = image_tensor.detach().float()
+        if img.dim() == 4:
+            if img.shape[0] < 1:
+                return None
+            img = img[0]
+        if img.dim() != 3 or img.shape[-1] < 1:
+            return None
+
+        channels = int(img.shape[-1])
+        if bool(use_alpha) and channels >= 4:
+            alpha = img[..., 3].clamp(0.0, 1.0)
+            mask_2d = 1.0 - alpha if bool(invert_alpha) else alpha
+        elif channels >= 3:
+            rgb = img[..., :3].clamp(0.0, 1.0)
+            mask_2d = rgb[..., 0] * 0.299 + rgb[..., 1] * 0.587 + rgb[..., 2] * 0.114
+        else:
+            mask_2d = img[..., 0].clamp(0.0, 1.0)
+
+        mask_2d = mask_2d.float()
+        if target_h is not None and target_w is not None:
+            mask_2d = _resize_2d(mask_2d, int(target_h), int(target_w), mode="nearest")
+        if bool(binarize):
+            mask_2d = _binarize_2d(mask_2d, threshold)
+        return mask_2d
+    except Exception as e:
+        print(f"{warning_prefix} Warning: failed to read image tensor: {e}")
+        return None
+
+
 def _format_2d_for_target(mask_2d: torch.Tensor, target_mask: Optional[torch.Tensor]) -> torch.Tensor:
     m2d = mask_2d.float()
     target_hw = _mask_hw(target_mask)
@@ -328,16 +372,16 @@ class FreeFuseMaskBankFromImages:
                 "freefuse_data": ("FREEFUSE_DATA",),
             },
             "optional": {
-                "mask_image_00": ("STRING", {"default": "", "multiline": False}),
-                "mask_image_01": ("STRING", {"default": "", "multiline": False}),
-                "mask_image_02": ("STRING", {"default": "", "multiline": False}),
-                "mask_image_03": ("STRING", {"default": "", "multiline": False}),
-                "mask_image_04": ("STRING", {"default": "", "multiline": False}),
-                "mask_image_05": ("STRING", {"default": "", "multiline": False}),
-                "mask_image_06": ("STRING", {"default": "", "multiline": False}),
-                "mask_image_07": ("STRING", {"default": "", "multiline": False}),
-                "mask_image_08": ("STRING", {"default": "", "multiline": False}),
-                "mask_image_09": ("STRING", {"default": "", "multiline": False}),
+                "mask_image_00": ("IMAGE",),
+                "mask_image_01": ("IMAGE",),
+                "mask_image_02": ("IMAGE",),
+                "mask_image_03": ("IMAGE",),
+                "mask_image_04": ("IMAGE",),
+                "mask_image_05": ("IMAGE",),
+                "mask_image_06": ("IMAGE",),
+                "mask_image_07": ("IMAGE",),
+                "mask_image_08": ("IMAGE",),
+                "mask_image_09": ("IMAGE",),
                 "width": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8}),
                 "height": ("INT", {"default": 0, "min": 0, "max": 16384, "step": 8}),
                 "use_alpha": ("BOOLEAN", {"default": True}),
@@ -397,24 +441,22 @@ class FreeFuseMaskBankFromImages:
 
         for i, adapter_name in enumerate(adapter_names[:10]):
             key = f"mask_image_{i:02d}"
-            image_ref = kwargs.get(key)
-            path_like, _ = _parse_image_ref(image_ref)
-            if path_like is None:
+            image_tensor = kwargs.get(key)
+            if image_tensor is None:
                 continue
 
-            mask = _load_mask_from_image_ref(
-                image_ref=image_ref,
+            mask = _load_mask_from_image_tensor(
+                image_tensor=image_tensor,
                 target_h=target_h,
                 target_w=target_w,
                 use_alpha=bool(use_alpha),
                 invert_alpha=bool(invert_alpha),
-                prefer_alpha=True,
                 threshold=float(threshold),
                 binarize=True,
                 warning_prefix="[FreeFuseMaskBankFromImages]",
             )
             if mask is None:
-                print(f"[FreeFuseMaskBankFromImages] Warning: failed to load {key} for adapter '{adapter_name}'")
+                print(f"[FreeFuseMaskBankFromImages] Warning: failed to read {key} for adapter '{adapter_name}'")
                 continue
             masks[adapter_name] = mask.float()
 
