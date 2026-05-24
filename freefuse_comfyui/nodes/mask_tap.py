@@ -390,8 +390,8 @@ class FreeFuseMaskBankFromImages:
             },
         }
 
-    RETURN_TYPES = ("FREEFUSE_MASKS",)
-    RETURN_NAMES = ("mask_bank",)
+    RETURN_TYPES = ("FREEFUSE_MASKS", "STRING")
+    RETURN_NAMES = ("mask_bank", "slot_names")
     FUNCTION = "build_mask_bank"
     CATEGORY = "FreeFuse/Utils"
 
@@ -438,8 +438,14 @@ class FreeFuseMaskBankFromImages:
         adapter_names = self._adapter_names(freefuse_data)
         target_h, target_w = self._target_size(width, height)
         masks: Dict[str, torch.Tensor] = {}
+        slot_lines: List[str] = []
 
-        for i, adapter_name in enumerate(adapter_names[:10]):
+        for i in range(10):
+            adapter_name = adapter_names[i] if i < len(adapter_names) else ""
+            slot_lines.append(f"{i:02d}:{adapter_name}")
+            if not adapter_name:
+                continue
+
             key = f"mask_image_{i:02d}"
             image_tensor = kwargs.get(key)
             if image_tensor is None:
@@ -468,7 +474,8 @@ class FreeFuseMaskBankFromImages:
                 "source": "mask_images",
             },
         }
-        return (mask_bank,)
+        slot_names = "\n".join(slot_lines)
+        return (mask_bank, slot_names)
 
 
 class FreeFuseMaskTap:

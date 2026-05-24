@@ -78,6 +78,14 @@ def _split_rgba_image(left_alpha, right_alpha):
     return img
 
 
+def _slot_names(*names):
+    lines = []
+    for i in range(10):
+        name = names[i] if i < len(names) else ""
+        lines.append(f"{i:02d}:{name}")
+    return "\n".join(lines)
+
+
 def test_tap_order_from_freefuse_data():
     mod = _module()
     tap = mod.FreeFuseMaskTap()
@@ -324,12 +332,13 @@ def test_mask_bank_from_images_builds_bank_in_adapter_order():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
 
-    out, = node.build_mask_bank(
+    out, slot_names = node.build_mask_bank(
         freefuse_data=_freefuse_data("first", "second"),
         mask_image_00=_solid_rgb_image(2, 3, 1.0),
         mask_image_01=_solid_rgb_image(2, 3, 0.0),
     )
 
+    assert slot_names == _slot_names("first", "second")
     assert list(out["masks"].keys()) == ["first", "second"]
     assert torch.allclose(out["masks"]["first"], torch.ones(2, 3), atol=1e-6)
     assert torch.allclose(out["masks"]["second"], torch.zeros(2, 3), atol=1e-6)
@@ -343,16 +352,16 @@ def test_mask_bank_from_images_alpha_defaults_invert_and_rgb_fallback():
     node = mod.FreeFuseMaskBankFromImages()
     image = _split_rgba_image(left_alpha=0.0, right_alpha=1.0)
 
-    normal, = node.build_mask_bank(
+    normal, _ = node.build_mask_bank(
         freefuse_data=_freefuse_data("alpha_lora"),
         mask_image_00=image,
     )
-    inverted, = node.build_mask_bank(
+    inverted, _ = node.build_mask_bank(
         freefuse_data=_freefuse_data("alpha_lora"),
         mask_image_00=image,
         invert_alpha=True,
     )
-    rgb_fallback, = node.build_mask_bank(
+    rgb_fallback, _ = node.build_mask_bank(
         freefuse_data=_freefuse_data("alpha_lora"),
         mask_image_00=image,
         use_alpha=False,
@@ -374,13 +383,14 @@ def test_mask_bank_from_images_resizes_and_skips_empty_slots():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
 
-    out, = node.build_mask_bank(
+    out, slot_names = node.build_mask_bank(
         freefuse_data=_freefuse_data("empty_slot", "filled_slot"),
         mask_image_01=_checker_rgb_image(batch=False),
         width=4,
         height=4,
     )
 
+    assert slot_names == _slot_names("empty_slot", "filled_slot")
     assert "empty_slot" not in out["masks"]
     assert list(out["masks"].keys()) == ["filled_slot"]
     mask = out["masks"]["filled_slot"]
@@ -403,11 +413,12 @@ def test_mask_bank_from_images_uses_first_image_from_batch():
         dim=0,
     )
 
-    out, = node.build_mask_bank(
+    out, slot_names = node.build_mask_bank(
         freefuse_data=_freefuse_data("batched"),
         mask_image_00=batch,
     )
 
+    assert slot_names == _slot_names("batched")
     assert torch.allclose(out["masks"]["batched"], torch.zeros(2, 2), atol=1e-6)
 
 
@@ -416,6 +427,8 @@ def test_mask_bank_from_images_local_registration():
 
     assert mod.NODE_CLASS_MAPPINGS["FreeFuseMaskBankFromImages"] is mod.FreeFuseMaskBankFromImages
     assert mod.NODE_DISPLAY_NAME_MAPPINGS["FreeFuseMaskBankFromImages"] == "FreeFuse Mask Bank From Images"
+    assert mod.FreeFuseMaskBankFromImages.RETURN_TYPES == ("FREEFUSE_MASKS", "STRING")
+    assert mod.FreeFuseMaskBankFromImages.RETURN_NAMES == ("mask_bank", "slot_names")
 
     inputs = mod.FreeFuseMaskBankFromImages.INPUT_TYPES()
     for i in range(10):
@@ -439,12 +452,13 @@ def test_mask_bank_from_images_no_adapters_returns_empty_bank():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
 
-    out, = node.build_mask_bank(freefuse_data={"adapters": []})
+    out, slot_names = node.build_mask_bank(freefuse_data={"adapters": []})
 
     assert out["masks"] == {}
     assert out["similarity_maps"] == {}
     assert out["metadata"]["adapter_names"] == []
     assert out["metadata"]["source"] == "mask_images"
+    assert slot_names == _slot_names()
 
 
 def run_all_tests():
