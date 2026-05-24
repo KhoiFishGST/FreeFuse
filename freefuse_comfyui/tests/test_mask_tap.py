@@ -53,6 +53,31 @@ def _save_split_alpha(path, left_alpha, right_alpha):
     img.save(path)
 
 
+def _solid_rgb_image(height, width, value, *, batch=True):
+    img = torch.full((height, width, 3), float(value), dtype=torch.float32)
+    return img.unsqueeze(0) if batch else img
+
+
+def _checker_rgb_image(*, batch=True):
+    img = torch.tensor(
+        [
+            [[1.0, 1.0, 1.0], [0.0, 0.0, 0.0]],
+            [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
+        ],
+        dtype=torch.float32,
+    )
+    return img.unsqueeze(0) if batch else img
+
+
+def _split_rgba_image(left_alpha, right_alpha):
+    img = torch.zeros((1, 2, 4, 4), dtype=torch.float32)
+    img[:, :, :2, :3] = 1.0
+    img[:, :, 2:, :3] = 0.0
+    img[:, :, :2, 3] = float(left_alpha)
+    img[:, :, 2:, 3] = float(right_alpha)
+    return img
+
+
 def test_tap_order_from_freefuse_data():
     mod = _module()
     tap = mod.FreeFuseMaskTap()
@@ -299,17 +324,11 @@ def test_mask_bank_from_images_builds_bank_in_adapter_order():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
 
-    with tempfile.TemporaryDirectory() as td:
-        a_path = os.path.join(td, "a.png")
-        b_path = os.path.join(td, "b.png")
-        Image.new("L", (3, 2), color=255).save(a_path)
-        Image.new("L", (3, 2), color=0).save(b_path)
-
-        out, = node.build_mask_bank(
-            freefuse_data=_freefuse_data("first", "second"),
-            mask_image_00=a_path,
-            mask_image_01=b_path,
-        )
+    out, = node.build_mask_bank(
+        freefuse_data=_freefuse_data("first", "second"),
+        mask_image_00=_solid_rgb_image(2, 3, 1.0),
+        mask_image_01=_solid_rgb_image(2, 3, 0.0),
+    )
 
     assert list(out["masks"].keys()) == ["first", "second"]
     assert torch.allclose(out["masks"]["first"], torch.ones(2, 3), atol=1e-6)
@@ -319,54 +338,48 @@ def test_mask_bank_from_images_builds_bank_in_adapter_order():
     assert out["metadata"]["source"] == "mask_images"
 
 
-def test_mask_bank_from_images_alpha_defaults_and_invert():
+def test_mask_bank_from_images_alpha_defaults_invert_and_rgb_fallback():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
+    image = _split_rgba_image(left_alpha=0.0, right_alpha=1.0)
 
-    with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "alpha.png")
-        _save_split_alpha(path, left_alpha=0, right_alpha=255)
-
-        # Source images use direct alpha by default: alpha 0 -> mask 0, alpha 255 -> mask 1.
-        normal, = node.build_mask_bank(
-            freefuse_data=_freefuse_data("alpha_lora"),
-            mask_image_00=path,
-        )
-        inverted, = node.build_mask_bank(
-            freefuse_data=_freefuse_data("alpha_lora"),
-            mask_image_00=path,
-            invert_alpha=True,
-        )
+    normal, = node.build_mask_bank(
+        freefuse_data=_freefuse_data("alpha_lora"),
+        mask_image_00=image,
+    )
+    inverted, = node.build_mask_bank(
+        freefuse_data=_freefuse_data("alpha_lora"),
+        mask_image_00=image,
+        invert_alpha=True,
+    )
+    rgb_fallback, = node.build_mask_bank(
+        freefuse_data=_freefuse_data("alpha_lora"),
+        mask_image_00=image,
+        use_alpha=False,
+    )
 
     normal_mask = normal["masks"]["alpha_lora"]
     inverted_mask = inverted["masks"]["alpha_lora"]
+    rgb_mask = rgb_fallback["masks"]["alpha_lora"]
 
     assert torch.allclose(normal_mask[:, :2], torch.zeros(2, 2), atol=1e-6)
     assert torch.allclose(normal_mask[:, 2:], torch.ones(2, 2), atol=1e-6)
     assert torch.allclose(inverted_mask[:, :2], torch.ones(2, 2), atol=1e-6)
     assert torch.allclose(inverted_mask[:, 2:], torch.zeros(2, 2), atol=1e-6)
+    assert torch.allclose(rgb_mask[:, :2], torch.ones(2, 2), atol=1e-6)
+    assert torch.allclose(rgb_mask[:, 2:], torch.zeros(2, 2), atol=1e-6)
 
 
 def test_mask_bank_from_images_resizes_and_skips_empty_slots():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
 
-    with tempfile.TemporaryDirectory() as td:
-        path = os.path.join(td, "small.png")
-        img = Image.new("L", (2, 2), color=0)
-        px = img.load()
-        px[0, 0] = 255
-        px[1, 0] = 0
-        px[0, 1] = 0
-        px[1, 1] = 255
-        img.save(path)
-
-        out, = node.build_mask_bank(
-            freefuse_data=_freefuse_data("empty_slot", "filled_slot"),
-            mask_image_01=path,
-            width=4,
-            height=4,
-        )
+    out, = node.build_mask_bank(
+        freefuse_data=_freefuse_data("empty_slot", "filled_slot"),
+        mask_image_01=_checker_rgb_image(batch=False),
+        width=4,
+        height=4,
+    )
 
     assert "empty_slot" not in out["masks"]
     assert list(out["masks"].keys()) == ["filled_slot"]
@@ -379,11 +392,34 @@ def test_mask_bank_from_images_resizes_and_skips_empty_slots():
     assert out["metadata"]["adapter_names"] == ["empty_slot", "filled_slot"]
 
 
+def test_mask_bank_from_images_uses_first_image_from_batch():
+    mod = _module()
+    node = mod.FreeFuseMaskBankFromImages()
+    batch = torch.stack(
+        [
+            torch.zeros((2, 2, 3), dtype=torch.float32),
+            torch.ones((2, 2, 3), dtype=torch.float32),
+        ],
+        dim=0,
+    )
+
+    out, = node.build_mask_bank(
+        freefuse_data=_freefuse_data("batched"),
+        mask_image_00=batch,
+    )
+
+    assert torch.allclose(out["masks"]["batched"], torch.zeros(2, 2), atol=1e-6)
+
+
 def test_mask_bank_from_images_local_registration():
     mod = _module()
 
     assert mod.NODE_CLASS_MAPPINGS["FreeFuseMaskBankFromImages"] is mod.FreeFuseMaskBankFromImages
     assert mod.NODE_DISPLAY_NAME_MAPPINGS["FreeFuseMaskBankFromImages"] == "FreeFuse Mask Bank From Images"
+
+    inputs = mod.FreeFuseMaskBankFromImages.INPUT_TYPES()
+    for i in range(10):
+        assert inputs["optional"][f"mask_image_{i:02d}"] == ("IMAGE",)
 
 
 def test_mask_bank_from_images_package_export_registration():
@@ -423,8 +459,9 @@ def run_all_tests():
     test_ui_editor_image_contains_visible_rgb_and_alpha_mask()
     test_load_mask_prefer_alpha_uses_flat_alpha()
     test_mask_bank_from_images_builds_bank_in_adapter_order()
-    test_mask_bank_from_images_alpha_defaults_and_invert()
+    test_mask_bank_from_images_alpha_defaults_invert_and_rgb_fallback()
     test_mask_bank_from_images_resizes_and_skips_empty_slots()
+    test_mask_bank_from_images_uses_first_image_from_batch()
     test_mask_bank_from_images_local_registration()
     test_mask_bank_from_images_package_export_registration()
     test_mask_bank_from_images_no_adapters_returns_empty_bank()
