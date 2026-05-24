@@ -383,6 +383,29 @@ def test_mask_bank_from_images_alpha_defaults_invert_and_rgb_fallback():
     assert torch.allclose(rgb_mask[:, 2:], torch.zeros(2, 2), atol=1e-6)
 
 
+def test_mask_bank_from_images_rgb_uses_red_channel():
+    mod = _module()
+    node = mod.FreeFuseMaskBankFromImages()
+    image = torch.tensor(
+        [
+            [
+                [[0.0, 1.0, 0.0], [1.0, 0.0, 0.0]],
+                [[0.0, 0.0, 1.0], [1.0, 1.0, 1.0]],
+            ]
+        ],
+        dtype=torch.float32,
+    )
+
+    out, _, slot_mask_images = node.build_mask_bank(
+        freefuse_data=_freefuse_data("rgb_lora"),
+        mask_image_00=image,
+    )
+
+    expected = torch.tensor([[0.0, 1.0], [0.0, 1.0]], dtype=torch.float32)
+    assert torch.allclose(out["masks"]["rgb_lora"], expected, atol=1e-6)
+    assert torch.allclose(slot_mask_images[0, :, :, 0], expected, atol=1e-6)
+
+
 def test_mask_bank_from_images_resizes_and_skips_empty_slots():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
@@ -488,6 +511,7 @@ def run_all_tests():
     test_load_mask_prefer_alpha_uses_flat_alpha()
     test_mask_bank_from_images_builds_bank_in_adapter_order()
     test_mask_bank_from_images_alpha_defaults_invert_and_rgb_fallback()
+    test_mask_bank_from_images_rgb_uses_red_channel()
     test_mask_bank_from_images_resizes_and_skips_empty_slots()
     test_mask_bank_from_images_uses_first_image_from_batch()
     test_mask_bank_from_images_local_registration()

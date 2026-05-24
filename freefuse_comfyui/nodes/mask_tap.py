@@ -297,8 +297,7 @@ def _load_mask_from_image_tensor(
             alpha = img[..., 3].clamp(0.0, 1.0)
             mask_2d = 1.0 - alpha if bool(invert_alpha) else alpha
         elif channels >= 3:
-            rgb = img[..., :3].clamp(0.0, 1.0)
-            mask_2d = rgb[..., 0] * 0.299 + rgb[..., 1] * 0.587 + rgb[..., 2] * 0.114
+            mask_2d = img[..., 0].clamp(0.0, 1.0)
         else:
             mask_2d = img[..., 0].clamp(0.0, 1.0)
 
