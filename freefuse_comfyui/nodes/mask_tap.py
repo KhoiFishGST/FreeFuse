@@ -390,8 +390,8 @@ class FreeFuseMaskBankFromImages:
             },
         }
 
-    RETURN_TYPES = ("FREEFUSE_MASKS", "STRING")
-    RETURN_NAMES = ("mask_bank", "slot_names")
+    RETURN_TYPES = ("FREEFUSE_MASKS", "STRING", "IMAGE")
+    RETURN_NAMES = ("mask_bank", "slot_names", "slot_mask_images")
     FUNCTION = "build_mask_bank"
     CATEGORY = "FreeFuse/Utils"
 
@@ -439,16 +439,19 @@ class FreeFuseMaskBankFromImages:
         target_h, target_w = self._target_size(width, height)
         masks: Dict[str, torch.Tensor] = {}
         slot_lines: List[str] = []
+        slot_masks: List[Optional[torch.Tensor]] = []
 
         for i in range(10):
             adapter_name = adapter_names[i] if i < len(adapter_names) else ""
             slot_lines.append(f"{i:02d}:{adapter_name}")
             if not adapter_name:
+                slot_masks.append(None)
                 continue
 
             key = f"mask_image_{i:02d}"
             image_tensor = kwargs.get(key)
             if image_tensor is None:
+                slot_masks.append(None)
                 continue
 
             mask = _load_mask_from_image_tensor(
@@ -463,8 +466,10 @@ class FreeFuseMaskBankFromImages:
             )
             if mask is None:
                 print(f"[FreeFuseMaskBankFromImages] Warning: failed to read {key} for adapter '{adapter_name}'")
+                slot_masks.append(None)
                 continue
             masks[adapter_name] = mask.float()
+            slot_masks.append(mask.float())
 
         mask_bank = {
             "masks": masks,
@@ -475,7 +480,35 @@ class FreeFuseMaskBankFromImages:
             },
         }
         slot_names = "\n".join(slot_lines)
-        return (mask_bank, slot_names)
+
+        preview_h, preview_w = 64, 64
+        if target_h is not None and target_w is not None:
+            preview_h, preview_w = int(target_h), int(target_w)
+        else:
+            for mask in slot_masks:
+                hw = _mask_hw(mask)
+                if hw is not None:
+                    preview_h, preview_w = hw
+                    break
+
+        slot_images: List[torch.Tensor] = []
+        for mask in slot_masks:
+            m2d = _to_2d_mask(mask)
+            if m2d is None:
+                m2d = torch.zeros((preview_h, preview_w), dtype=torch.float32)
+            else:
+                m2d = _resize_2d(m2d.float(), preview_h, preview_w, mode="nearest")
+            img = (
+                _binarize_2d(m2d)
+                .clamp(0.0, 1.0)
+                .detach()
+                .cpu()
+                .unsqueeze(-1)
+                .repeat(1, 1, 3)
+            )
+            slot_images.append(img)
+        slot_mask_images = torch.stack(slot_images, dim=0)
+        return (mask_bank, slot_names, slot_mask_images)
 
 
 class FreeFuseMaskTap:
