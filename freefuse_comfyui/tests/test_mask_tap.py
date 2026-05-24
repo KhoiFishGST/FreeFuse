@@ -336,6 +336,8 @@ def test_mask_bank_from_images_builds_bank_in_adapter_order():
         freefuse_data=_freefuse_data("first", "second"),
         mask_image_00=_solid_rgb_image(2, 3, 1.0),
         mask_image_01=_solid_rgb_image(2, 3, 0.0),
+        width=0,
+        height=0,
     )
 
     assert slot_names == _slot_names("first", "second")
@@ -351,6 +353,19 @@ def test_mask_bank_from_images_builds_bank_in_adapter_order():
     assert out["metadata"]["source"] == "mask_images"
 
 
+def test_mask_bank_from_images_defaults_to_64x64():
+    mod = _module()
+    node = mod.FreeFuseMaskBankFromImages()
+
+    out, _, slot_mask_images = node.build_mask_bank(
+        freefuse_data=_freefuse_data("default_size"),
+        mask_image_00=_solid_rgb_image(2, 3, 1.0),
+    )
+
+    assert out["masks"]["default_size"].shape == (64, 64)
+    assert slot_mask_images.shape == (10, 64, 64, 3)
+
+
 def test_mask_bank_from_images_alpha_defaults_invert_and_rgb_fallback():
     mod = _module()
     node = mod.FreeFuseMaskBankFromImages()
@@ -359,15 +374,21 @@ def test_mask_bank_from_images_alpha_defaults_invert_and_rgb_fallback():
     normal, _, _ = node.build_mask_bank(
         freefuse_data=_freefuse_data("alpha_lora"),
         mask_image_00=image,
+        width=0,
+        height=0,
     )
     inverted, _, _ = node.build_mask_bank(
         freefuse_data=_freefuse_data("alpha_lora"),
         mask_image_00=image,
+        width=0,
+        height=0,
         invert_alpha=True,
     )
     rgb_fallback, _, _ = node.build_mask_bank(
         freefuse_data=_freefuse_data("alpha_lora"),
         mask_image_00=image,
+        width=0,
+        height=0,
         use_alpha=False,
     )
 
@@ -399,6 +420,8 @@ def test_mask_bank_from_images_rgb_uses_red_channel():
     out, _, slot_mask_images = node.build_mask_bank(
         freefuse_data=_freefuse_data("rgb_lora"),
         mask_image_00=image,
+        width=0,
+        height=0,
     )
 
     expected = torch.tensor([[0.0, 1.0], [0.0, 1.0]], dtype=torch.float32)
@@ -449,6 +472,8 @@ def test_mask_bank_from_images_uses_first_image_from_batch():
     out, slot_names, slot_mask_images = node.build_mask_bank(
         freefuse_data=_freefuse_data("batched"),
         mask_image_00=batch,
+        width=0,
+        height=0,
     )
 
     assert slot_names == _slot_names("batched")
@@ -468,6 +493,8 @@ def test_mask_bank_from_images_local_registration():
     inputs = mod.FreeFuseMaskBankFromImages.INPUT_TYPES()
     for i in range(10):
         assert inputs["optional"][f"mask_image_{i:02d}"][0] == "IMAGE"
+    assert inputs["optional"]["width"][1]["default"] == 64
+    assert inputs["optional"]["height"][1]["default"] == 64
 
 
 def test_mask_bank_from_images_package_export_registration():
@@ -510,6 +537,7 @@ def run_all_tests():
     test_ui_editor_image_contains_visible_rgb_and_alpha_mask()
     test_load_mask_prefer_alpha_uses_flat_alpha()
     test_mask_bank_from_images_builds_bank_in_adapter_order()
+    test_mask_bank_from_images_defaults_to_64x64()
     test_mask_bank_from_images_alpha_defaults_invert_and_rgb_fallback()
     test_mask_bank_from_images_rgb_uses_red_channel()
     test_mask_bank_from_images_resizes_and_skips_empty_slots()
